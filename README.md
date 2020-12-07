@@ -136,8 +136,8 @@
   					go func() {
   						defer cancel()
   						// Ассинхронно запускаем сервер, т.к. Serve - блокирующая операция.
-  						if err := s.Serve(context.Background()); err != nil {
-  							logger.Print("Error:", err)
+  						if err := s.Serve(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+  							logger.Print("Error: ", err)
   						}
   					}()
   					return nil
@@ -264,6 +264,9 @@
   	"log"
   	"os"
   
+  	"errors"
+  	"net/http"
+  
   	"github.com/vivid-money/article-golang-di/pkg/components"
   )
   
@@ -290,8 +293,8 @@
   ) (*components.HTTPServer, func()) {
   	srv := components.NewHTTPServer(logger, conn)
   	go func() {
-  		if err := srv.Serve(ctx); err != nil {
-  			logger.Print("Error serving http:", err)
+  		if err := srv.Serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+  			logger.Print("Error serving http: ", err)
   		}
   		closer()
   	}()
@@ -310,23 +313,24 @@
   	logger := log.New(os.Stderr, "", 0)
   	logger.Print("Started")
   
-  	// Нужен способ остановить приложение по команде или в случае ошибки. Не хочется вызывать контекст, так как он
-  	// прекратит все Server'ы одновременно, что лишит смысла использование cleanup-функций. Поэтому мы будем делать это
-  	// вручную через закрытие канала с пустой структурой в качестве сигнала для остановки.
-  	stop := make(chan struct{})
+  	// Нужен способ остановить приложение по команде или в случае ошибки. Не хочется отменять "главный" кониекси, так
+  	// как он прекратит все Server'ы одновременно, что лишит смысла использование cleanup-функций. Поэтому мы будем
+  	// делать это на другом контексте.
+  	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+  	defer cancelLifecycle()
   
   	// Ничего не делаем с сервером, потому что вызываем Serve в конструкторах.
   	_, cleanup, _ := initializeHTTPServer(ctx, logger, func() {
-  		close(stop)
+  		cancelLifecycle()
   	})
   	defer cleanup()
   
   	go func() {
   		components.AwaitSignal(ctx) // ждём ошибки или сигнала
-  		close(stop)
+  		cancelLifecycle()
   	}()
   
-  	<-stop
+  	<-lifecycleCtx.Done()
   	/*
   		Output:
   		---
@@ -405,7 +409,7 @@
   				logger.Print("Stopped http server with error:", err)
   			}
   		}()
-  		if err := httpServer.Serve(gCtx); err != nil {
+  		if err := httpServer.Serve(gCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
   			return fmt.Errorf("can't serve http: %w", err)
   		}
   		return nil
@@ -518,9 +522,13 @@
   import (
   	"context"
   	"fmt"
-  	"github.com/vivid-money/article-golang-di/pkg/components"
   	"log"
   	"os"
+  
+  	"errors"
+  	"net/http"
+  
+  	"github.com/vivid-money/article-golang-di/pkg/components"
   )
   
   func main() {
@@ -567,7 +575,7 @@
   	defer Shutdown("dbConn", errSet, dbConn.Stop)
   
   	httpServer := components.NewHTTPServer(logger, dbConn)
-  	if ctx, err = Serve(ctx, "httpServer", errSet, httpServer.Serve); err != nil {
+  	if ctx, err = Serve(ctx, "httpServer", errSet, httpServer.Serve); err != nil && !errors.Is(err, http.ErrServerClosed) {
   		return fmt.Errorf("cant serve httpServer: %w", err)
   	}
   	defer Shutdown("httpServer", errSet, httpServer.Stop)

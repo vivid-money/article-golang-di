@@ -67,119 +67,119 @@
 Идея проста, граф зависимостей можно легко динамически описать в рантайме, там же к каждому из компонентов можно привязать хуки на старт и завершение работы. Посмотрим, как это выглядит на простом примере:
 
 ```go
-  // Логгер в качестве исключения создадим заранее, потому что как правило что-то нужно писать в логи сразу, ещё до инициализации графа зависимостей.
-  logger := log.New(os.Stderr, "", 0)
-  logger.Print("Started")
-  
-  container := dig.New() // создаём контейнер
-  // Регистрируем конструкторы.
-  // Dig во время запуска программы будет использовать рефлексию, чтобы по сигнатуре каждой функции понять, что она создаёт и что для этого требует.
-  _ = container.Provide(func() components.Logger {
-  	logger.Print("Provided logger")
-  	return logger // Прокинули уже созданный логгер.
-  })
-  _ = container.Provide(components.NewDBConn)
-  _ = container.Provide(components.NewHTTPServer)
-  
-  _ = container.Invoke(func(_ *components.HTTPServer) {
-  	// Вызвали HTTPServer, как "корень" графа зависимостей, чтобы прогрузилось всё необходимое.
-  	logger.Print("Can work with HTTPServer")
-  	// Никаких средств для управления жизненным циклом нет, пришлось бы всё писать вручную.
-  })
-  /*
-  	Output:
-  	---
-  	Started
-  	Provided logger
-  	New DBConn
-  	New HTTPServer
-  	Can work with HTTPServer
-  */
+// Логгер в качестве исключения создадим заранее, потому что как правило что-то нужно писать в логи сразу, ещё до инициализации графа зависимостей.
+logger := log.New(os.Stderr, "", 0)
+logger.Print("Started")
+
+container := dig.New() // создаём контейнер
+// Регистрируем конструкторы.
+// Dig во время запуска программы будет использовать рефлексию, чтобы по сигнатуре каждой функции понять, что она создаёт и что для этого требует.
+_ = container.Provide(func() components.Logger {
+	logger.Print("Provided logger")
+	return logger // Прокинули уже созданный логгер.
+})
+_ = container.Provide(components.NewDBConn)
+_ = container.Provide(components.NewHTTPServer)
+
+_ = container.Invoke(func(_ *components.HTTPServer) {
+	// Вызвали HTTPServer, как "корень" графа зависимостей, чтобы прогрузилось всё необходимое.
+	logger.Print("Can work with HTTPServer")
+	// Никаких средств для управления жизненным циклом нет, пришлось бы всё писать вручную.
+})
+/*
+	Output:
+	---
+	Started
+	Provided logger
+	New DBConn
+	New HTTPServer
+	Can work with HTTPServer
+*/
 ```
 
 Также fx предоставляет возможность работать непосредственно с жизненным циклом приложения:
 ```go
-  ctx, cancel := context.WithCancel(context.Background())
-  defer cancel()
-  
-  // Логгер в качестве исключения создадим заранее, потому что как правило что-то нужно писать в логи сразу, ещё до
-  // инициализации графа зависимостей.
-  logger := log.New(os.Stderr, "", 0)
-  logger.Print("Started")
-  
-  // На этот раз используем fx, здесь уже у нас появляется объект "приложения".
-  app := fx.New(
-  	fx.Provide(func() components.Logger {
-  		return logger // Добавляем логгер как внешний компонент.
-  	}),
-  	fx.Provide(
-  		func(logger components.Logger, lc fx.Lifecycle) *components.DBConn { // можем получить ещё и lc - жизненный цикл.
-  			conn := components.NewDBConn(logger)
-  			// Можно навесить хуки.
-  			lc.Append(fx.Hook{
-  				OnStart: func(ctx context.Context) error {
-  					if err := conn.Connect(ctx); err != nil {
-  						return fmt.Errorf("can't connect to db: %w", err)
-  					}
-  					return nil
-  				},
-  				OnStop: func(ctx context.Context) error {
-  					return conn.Stop(ctx)
-  				},
-  			})
-  			return conn
-  		},
-  		func(logger components.Logger, dbConn *components.DBConn, lc fx.Lifecycle) *components.HTTPServer {
-  			s := components.NewHTTPServer(logger, dbConn)
-  			lc.Append(fx.Hook{
-  				OnStart: func(_ context.Context) error {
-  					go func() {
-  						defer cancel()
-  						// Ассинхронно запускаем сервер, т.к. Serve - блокирующая операция.
-  						if err := s.Serve(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
-  							logger.Print("Error: ", err)
-  						}
-  					}()
-  					return nil
-  				},
-  				OnStop: func(ctx context.Context) error {
-  					return s.Stop(ctx)
-  				},
-  			})
-  			return s
-  		},
-  	),
-  	fx.Invoke(
-  		// Конструкторы - "ленивые", так что нужно будет вызвать корень графа зависимостей, чтобы прогрузилось всё необходимое.
-  		func(*components.HTTPServer) {
-  			go func() {
-  				components.AwaitSignal(ctx) // ожидаем сигнала, чтобы после этого завершить приложение.
-  				cancel()
-  			}()
-  		},
-  	),
-  	fx.NopLogger,
-  )
-  
-  _ = app.Start(ctx)
-  
-  <-ctx.Done() // ожидаем завершения контекста в случае ошибки или получения сигнала
-  
-  _ = app.Stop(context.Background())
-  /*
-  	Output:
-  	---
-  	Started
-  	New DBConn
-  	New HTTPServer
-  	Connecting DBConn
-  	Connected DBConn
-  	Serving HTTPServer
-  	^CStop HTTPServer
-  	Stopped HTTPServer
-  	Stop DBConn
-  	Stopped DBConn
-  */
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+// Логгер в качестве исключения создадим заранее, потому что как правило что-то нужно писать в логи сразу, ещё до
+// инициализации графа зависимостей.
+logger := log.New(os.Stderr, "", 0)
+logger.Print("Started")
+
+// На этот раз используем fx, здесь уже у нас появляется объект "приложения".
+app := fx.New(
+	fx.Provide(func() components.Logger {
+		return logger // Добавляем логгер как внешний компонент.
+	}),
+	fx.Provide(
+		func(logger components.Logger, lc fx.Lifecycle) *components.DBConn { // можем получить ещё и lc - жизненный цикл.
+			conn := components.NewDBConn(logger)
+			// Можно навесить хуки.
+			lc.Append(fx.Hook{
+				OnStart: func(ctx context.Context) error {
+					if err := conn.Connect(ctx); err != nil {
+						return fmt.Errorf("can't connect to db: %w", err)
+					}
+					return nil
+				},
+				OnStop: func(ctx context.Context) error {
+					return conn.Stop(ctx)
+				},
+			})
+			return conn
+		},
+		func(logger components.Logger, dbConn *components.DBConn, lc fx.Lifecycle) *components.HTTPServer {
+			s := components.NewHTTPServer(logger, dbConn)
+			lc.Append(fx.Hook{
+				OnStart: func(_ context.Context) error {
+					go func() {
+						defer cancel()
+						// Ассинхронно запускаем сервер, т.к. Serve - блокирующая операция.
+						if err := s.Serve(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+							logger.Print("Error: ", err)
+						}
+					}()
+					return nil
+				},
+				OnStop: func(ctx context.Context) error {
+					return s.Stop(ctx)
+				},
+			})
+			return s
+		},
+	),
+	fx.Invoke(
+		// Конструкторы - "ленивые", так что нужно будет вызвать корень графа зависимостей, чтобы прогрузилось всё необходимое.
+		func(*components.HTTPServer) {
+			go func() {
+				components.AwaitSignal(ctx) // ожидаем сигнала, чтобы после этого завершить приложение.
+				cancel()
+			}()
+		},
+	),
+	fx.NopLogger,
+)
+
+_ = app.Start(ctx)
+
+<-ctx.Done() // ожидаем завершения контекста в случае ошибки или получения сигнала
+
+_ = app.Stop(context.Background())
+/*
+	Output:
+	---
+	Started
+	New DBConn
+	New HTTPServer
+	Connecting DBConn
+	Connected DBConn
+	Serving HTTPServer
+	^CStop HTTPServer
+	Stopped HTTPServer
+	Stop DBConn
+	Stopped DBConn
+*/
 ```
 Может возникнуть вопрос, должен ли метод Serve быть блокирующим (по аналогии с ListenAndServe) или нет? Моя точка зрения на это проста: сделать блокирующий метод неблокирующим очень просто (`go blockingFunc()`), а вот обратное очень сложно. Так как любой код должен в том числе и облегчать работу с собой тем, кто его использует, логичнее всего предоставлять синхронный код, а ассинхронным его пусть сделает вызывающий, если ему это понадобится.
 
@@ -207,144 +207,144 @@
 В начале необходимо описать компоненты и конструкторы для них, стандартным способом.
 Затем в отдельном файле мы регистрируем конструкторы под специальным билд-тегом (чтобы код не попал в компиляцию уже "боевого" приложения и не возникало ошибок, связанных с одинаковыми именами функций):
 ```go
-  // +build wireinject
-  
-  package main
-  
-  import (
-  	"context"
-  
-  	"github.com/google/wire"
-  
-  	"github.com/vivid-money/article-golang-di/pkg/components"
-  )
-  
-  func initializeHTTPServer(
-  	_ context.Context,
-  	_ components.Logger,
-  	closer func(), // функция, которая вызовет остановку всего приложения
-  ) (
-  	res *components.HTTPServer,
-  	cleanup func(), // функция, которая остановит приложение
-  	err error,
-  ) {
-  	wire.Build(
-  		NewDBConn,
-  		NewHTTPServer,
-  	)
-  	return &components.HTTPServer{}, nil, nil
-  }
+// +build wireinject
+
+package main
+
+import (
+	"context"
+
+	"github.com/google/wire"
+
+	"github.com/vivid-money/article-golang-di/pkg/components"
+)
+
+func initializeHTTPServer(
+	_ context.Context,
+	_ components.Logger,
+	closer func(), // функция, которая вызовет остановку всего приложения
+) (
+	res *components.HTTPServer,
+	cleanup func(), // функция, которая остановит приложение
+	err error,
+) {
+	wire.Build(
+		NewDBConn,
+		NewHTTPServer,
+	)
+	return &components.HTTPServer{}, nil, nil
+}
 ```
 
 В итоге, после вызова одноименной утилиты `wire` (можно делать это через `go generate`), wire просканирует ваш код, найдёт все вызовы wire и сгенерирует файл с кодом, который проводит все инжекты:
 ```go
-  func initializeHTTPServer(contextContext context.Context, logger components.Logger, closer func()) (*components.HTTPServer, func(), error) {
-  	dbConn, cleanup, err := NewDBConn(contextContext, logger)
-  	if err != nil {
-  		return nil, nil, err
-  	}
-  	httpServer, cleanup2 := NewHTTPServer(contextContext, logger, dbConn, closer)
-  	return httpServer, func() {
-  		cleanup2()
-  		cleanup()
-  	}, nil
-  }
-  
+func initializeHTTPServer(contextContext context.Context, logger components.Logger, closer func()) (*components.HTTPServer, func(), error) {
+	dbConn, cleanup, err := NewDBConn(contextContext, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	httpServer, cleanup2 := NewHTTPServer(contextContext, logger, dbConn, closer)
+	return httpServer, func() {
+		cleanup2()
+		cleanup()
+	}, nil
+}
+
 ```
 
 Соответственно мы можем сразу же вызывать `initializeHTTPServer` при старте нашего приложения и использовать сгенерированный код, который создаст и "прокинет" куда надо все зависимости:
 ```go
-  package main
-  
-  //go:generate wire
-  
-  import (
-  	"context"
-  	"fmt"
-  	"log"
-  	"os"
-  
-  	"errors"
-  	"net/http"
-  
-  	"github.com/vivid-money/article-golang-di/pkg/components"
-  )
-  
-  // Поскольку wire не поддерживает lifecycle (точнее, поддерживает только Cleanup-функции), а мы не хотим
-  // делать вызовы компонентов в нужном порядке руками, то придётся написать специальные врапперы для конструкторов,
-  // которые при этом будут при создании компонента начинать работу и возвращать cleanup-функцию для его остановки.
-  func NewDBConn(ctx context.Context, logger components.Logger) (*components.DBConn, func(), error) {
-  	conn := components.NewDBConn(logger)
-  	if err := conn.Connect(ctx); err != nil {
-  		return nil, nil, fmt.Errorf("can't connect to db: %w", err)
-  	}
-  	return conn, func() {
-  		if err := conn.Stop(context.Background()); err != nil {
-  			logger.Print("Error trying to stop dbconn", err)
-  		}
-  	}, nil
-  }
-  
-  func NewHTTPServer(
-  	ctx context.Context,
-  	logger components.Logger,
-  	conn *components.DBConn,
-  	closer func(),
-  ) (*components.HTTPServer, func()) {
-  	srv := components.NewHTTPServer(logger, conn)
-  	go func() {
-  		if err := srv.Serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-  			logger.Print("Error serving http: ", err)
-  		}
-  		closer()
-  	}()
-  	return srv, func() {
-  		if err := srv.Stop(context.Background()); err != nil {
-  			logger.Print("Error trying to stop http server", err)
-  		}
-  	}
-  }
-  
-  func main() {
-  	ctx, cancel := context.WithCancel(context.Background())
-  	defer cancel()
-  
-  	// Логгер в качестве исключения создадим заранее, потому что как правило что-то нужно писать в логи сразу, ещё до инициализации графа зависимостей.
-  	logger := log.New(os.Stderr, "", 0)
-  	logger.Print("Started")
-  
-  	// Нужен способ остановить приложение по команде или в случае ошибки. Не хочется отменять "главный" кониекси, так
-  	// как он прекратит все Server'ы одновременно, что лишит смысла использование cleanup-функций. Поэтому мы будем
-  	// делать это на другом контексте.
-  	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
-  	defer cancelLifecycle()
-  
-  	// Ничего не делаем с сервером, потому что вызываем Serve в конструкторах.
-  	_, cleanup, _ := initializeHTTPServer(ctx, logger, func() {
-  		cancelLifecycle()
-  	})
-  	defer cleanup()
-  
-  	go func() {
-  		components.AwaitSignal(ctx) // ждём ошибки или сигнала
-  		cancelLifecycle()
-  	}()
-  
-  	<-lifecycleCtx.Done()
-  	/*
-  		Output:
-  		---
-  		New DBConn
-  		Connecting DBConn
-  		Connected DBConn
-  		New HTTPServer
-  		Serving HTTPServer
-  		^CStop HTTPServer
-  		Stopped HTTPServer
-  		Stop DBConn
-  		Stopped DBConn
-  	*/
-  }
+package main
+
+//go:generate wire
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"errors"
+	"net/http"
+
+	"github.com/vivid-money/article-golang-di/pkg/components"
+)
+
+// Поскольку wire не поддерживает lifecycle (точнее, поддерживает только Cleanup-функции), а мы не хотим
+// делать вызовы компонентов в нужном порядке руками, то придётся написать специальные врапперы для конструкторов,
+// которые при этом будут при создании компонента начинать работу и возвращать cleanup-функцию для его остановки.
+func NewDBConn(ctx context.Context, logger components.Logger) (*components.DBConn, func(), error) {
+	conn := components.NewDBConn(logger)
+	if err := conn.Connect(ctx); err != nil {
+		return nil, nil, fmt.Errorf("can't connect to db: %w", err)
+	}
+	return conn, func() {
+		if err := conn.Stop(context.Background()); err != nil {
+			logger.Print("Error trying to stop dbconn", err)
+		}
+	}, nil
+}
+
+func NewHTTPServer(
+	ctx context.Context,
+	logger components.Logger,
+	conn *components.DBConn,
+	closer func(),
+) (*components.HTTPServer, func()) {
+	srv := components.NewHTTPServer(logger, conn)
+	go func() {
+		if err := srv.Serve(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Print("Error serving http: ", err)
+		}
+		closer()
+	}()
+	return srv, func() {
+		if err := srv.Stop(context.Background()); err != nil {
+			logger.Print("Error trying to stop http server", err)
+		}
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Логгер в качестве исключения создадим заранее, потому что как правило что-то нужно писать в логи сразу, ещё до инициализации графа зависимостей.
+	logger := log.New(os.Stderr, "", 0)
+	logger.Print("Started")
+
+	// Нужен способ остановить приложение по команде или в случае ошибки. Не хочется отменять "главный" кониекси, так
+	// как он прекратит все Server'ы одновременно, что лишит смысла использование cleanup-функций. Поэтому мы будем
+	// делать это на другом контексте.
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	defer cancelLifecycle()
+
+	// Ничего не делаем с сервером, потому что вызываем Serve в конструкторах.
+	_, cleanup, _ := initializeHTTPServer(ctx, logger, func() {
+		cancelLifecycle()
+	})
+	defer cleanup()
+
+	go func() {
+		components.AwaitSignal(ctx) // ждём ошибки или сигнала
+		cancelLifecycle()
+	}()
+
+	<-lifecycleCtx.Done()
+	/*
+		Output:
+		---
+		New DBConn
+		Connecting DBConn
+		Connected DBConn
+		New HTTPServer
+		Serving HTTPServer
+		^CStop HTTPServer
+		Stopped HTTPServer
+		Stop DBConn
+		Stopped DBConn
+	*/
+}
 ```
 
 Плюсы такого подхода:
@@ -370,10 +370,10 @@
 
 Так вот, давайте представим простой код, который сделает все необходимые инжекты:
 ```go
-  logger := log.New(os.Stderr, "", 0)
-  dbConn := components.NewDBConn(logger)
-  httpServer := components.NewHTTPServer(logger, dbConn)
-  doSomething(httpServer)
+logger := log.New(os.Stderr, "", 0)
+dbConn := components.NewDBConn(logger)
+httpServer := components.NewHTTPServer(logger, dbConn)
+doSomething(httpServer)
 ```
 
 Это будет работать, это вполне минималистично, насколько это вообще можно без рантаймовой магии в данном языке, и вам не будет особенно дорого по необходимости (добавился новый аргумент или вообще новый компонент) добавить пару строк в этот код.
@@ -382,63 +382,63 @@
 #### Используем errgroup.
 Выглядит оно вот так:
 ```go
-  func main() {
-  	ctx, cancel := context.WithCancel(context.Background())
-  	defer cancel()
-  
-  	logger := log.New(os.Stderr, "", 0)
-  	logger.Print("Started")
-  
-  	g, gCtx := errgroup.WithContext(ctx)
-  
-  	dbConn := components.NewDBConn(logger)
-  	g.Go(func() error {
-  		// dbConn умеет останавливаться по отмене контекста.
-  		if err := dbConn.Connect(gCtx); err != nil {
-  			return fmt.Errorf("can't connect to db: %w", err)
-  		}
-  		return nil
-  	})
-  	httpServer := components.NewHTTPServer(logger, dbConn)
-  	g.Go(func() error {
-  		go func() {
-  			// предположим, что httpServer (как и http.ListenAndServe, кстати) не умеет останавливаться по отмене
-  			// контекста, тогда придётся добавить обработку отмены вручную.
-  			<-gCtx.Done()
-  			if err := httpServer.Stop(context.Background()); err != nil {
-  				logger.Print("Stopped http server with error:", err)
-  			}
-  		}()
-  		if err := httpServer.Serve(gCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-  			return fmt.Errorf("can't serve http: %w", err)
-  		}
-  		return nil
-  	})
-  
-  	go func() {
-  		components.AwaitSignal(gCtx)
-  		cancel()
-  	}()
-  
-  	_ = g.Wait()
-  
-  	/*
-  		Output:
-  		---
-  		Started
-  		New DBConn
-  		New HTTPServer
-  		Connecting DBConn
-  		Connected DBConn
-  		Serving HTTPServer
-  		^CStop HTTPServer
-  		Stop DBConn
-  		Stopped DBConn
-  		Stopped HTTPServer
-  		Finished serving HTTPServer
-  	*/
-  }
-  
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := log.New(os.Stderr, "", 0)
+	logger.Print("Started")
+
+	g, gCtx := errgroup.WithContext(ctx)
+
+	dbConn := components.NewDBConn(logger)
+	g.Go(func() error {
+		// dbConn умеет останавливаться по отмене контекста.
+		if err := dbConn.Connect(gCtx); err != nil {
+			return fmt.Errorf("can't connect to db: %w", err)
+		}
+		return nil
+	})
+	httpServer := components.NewHTTPServer(logger, dbConn)
+	g.Go(func() error {
+		go func() {
+			// предположим, что httpServer (как и http.ListenAndServe, кстати) не умеет останавливаться по отмене
+			// контекста, тогда придётся добавить обработку отмены вручную.
+			<-gCtx.Done()
+			if err := httpServer.Stop(context.Background()); err != nil {
+				logger.Print("Stopped http server with error:", err)
+			}
+		}()
+		if err := httpServer.Serve(gCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("can't serve http: %w", err)
+		}
+		return nil
+	})
+
+	go func() {
+		components.AwaitSignal(gCtx)
+		cancel()
+	}()
+
+	_ = g.Wait()
+
+	/*
+		Output:
+		---
+		Started
+		New DBConn
+		New HTTPServer
+		Connecting DBConn
+		Connected DBConn
+		Serving HTTPServer
+		^CStop HTTPServer
+		Stop DBConn
+		Stopped DBConn
+		Stopped HTTPServer
+		Finished serving HTTPServer
+	*/
+}
+
 ```
 Как это работает?
 Мы запускаем все компоненты нашего приложения в отдельных горутинах, но при этом запускаем не вручную, а через специальную структуру g, которая:
@@ -455,30 +455,30 @@
 Идея, кажется, лежит на поверхности: если errgroup не даёт нам нужных гарантий, можно написать свой велосипед, который их даёт.
 Таких идей в своё время не избежал и я и лично у меня получилось что-то такое:
 ```go
-  ctx, cancel := context.WithCancel(context.Background())
-  defer cancel()
-  
-  logger := log.New(os.Stderr, "", 0)
-  logger.Print("Started")
-  
-  lc := lifecycle.NewLifecycle()
-  
-  dbConn := components.NewDBConn(logger)
-  lc.AddServer(func(ctx context.Context) error { // просто регистриуем в правильном порядке серверы и шатдаунеры
-  	return dbConn.Connect(ctx)
-  }).AddShutdowner(func(ctx context.Context) error {
-  	return dbConn.Stop(ctx)
-  })
-  
-  httpSrv := components.NewHTTPServer(logger, dbConn)
-  lc.Add(httpSrv) // потому что httpSrv реализует интерфейсы Server и Shutdowner
-  
-  go func() {
-  	components.AwaitSignal(ctx)
-  	lc.Stop(context.Background())
-  }()
-  
-  _ = lc.Serve(ctx)
+ctx, cancel := context.WithCancel(context.Background())
+defer cancel()
+
+logger := log.New(os.Stderr, "", 0)
+logger.Print("Started")
+
+lc := lifecycle.NewLifecycle()
+
+dbConn := components.NewDBConn(logger)
+lc.AddServer(func(ctx context.Context) error { // просто регистриуем в правильном порядке серверы и шатдаунеры
+	return dbConn.Connect(ctx)
+}).AddShutdowner(func(ctx context.Context) error {
+	return dbConn.Stop(ctx)
+})
+
+httpSrv := components.NewHTTPServer(logger, dbConn)
+lc.Add(httpSrv) // потому что httpSrv реализует интерфейсы Server и Shutdowner
+
+go func() {
+	components.AwaitSignal(ctx)
+	lc.Stop(context.Background())
+}()
+
+_ = lc.Serve(ctx)
 ```
 И такая идея хороша всем, кроме того, что делает сложным образом то, что можно сделать намного проще, используя нативные средства самого языка.
 (именно поэтому реализации моего пакета `lifecycle` я не стал нигде выкладывать, это не имеет смысла)
@@ -491,23 +491,23 @@
 Третий удобный и чуть менее очевидный инструмет, defer, является просто ключевым словом, добавляющим в некий стек текушей функции другую функцию, которая должна быть выполнена после завершения текущей.
 А это означает, что во-первых, после defer'а можно делать сколько угодно return'ов не боясь, что где-то забудешь разблокировать мьютекс или закрыть файл (кстати, очень способствует сокращению ветвлений в коде), а во-вторых, _они вызываются в обратном порядке_. Можно вызывать конструкторы и каждый раз при вызове регистрировать деструктор и они вызовутся сами, по очереди, в правильном порядке с точки зрения графа зависимостей, не требуя никаких дополнительных инструментов:
 ```go
-  a, err := NewA()
-  if err != nil {
-  	panic("cant create a: " + err.Error())
-  }
-  go a.Serve()
-  defer a.Stop()
-  
-  b, err := NewB(a)
-  if err != nil {
-  	panic("cant create b: " + err.Error())
-  }
-  go b.Serve()
-  defer b.Stop()
-  /*
-  	Порядок старта: A, B
-  	Порядок остановки: B, A
-  */
+a, err := NewA()
+if err != nil {
+	panic("cant create a: " + err.Error())
+}
+go a.Serve()
+defer a.Stop()
+
+b, err := NewB(a)
+if err != nil {
+	panic("cant create b: " + err.Error())
+}
+go b.Serve()
+defer b.Stop()
+/*
+	Порядок старта: A, B
+	Порядок остановки: B, A
+*/
 ```
 
 Правда, остаётся ещё вопрос обработки ошибок, а также возврата первоначальной ошибки (что необязательно, но мне нравится делать именно так). Дело не обойдётся без трех маленьких хелперов:
@@ -517,72 +517,72 @@
 
 В итоге, код будет выглядеть так:
 ```go
-  package main
-  
-  import (
-  	"context"
-  	"fmt"
-  	"log"
-  	"os"
-  
-  	"errors"
-  	"net/http"
-  
-  	"github.com/vivid-money/article-golang-di/pkg/components"
-  )
-  
-  func main() {
-  	ctx, cancel := context.WithCancel(context.Background())
-  	defer cancel()
-  
-  	logger := log.New(os.Stderr, "", 0)
-  	logger.Print("Started")
-  
-  	go func() {
-  		components.AwaitSignal(ctx)
-  		cancel()
-  	}()
-  
-  	errset := &ErrSet{}
-  
-  	errset.Add(runApp(ctx, logger, errset))
-  
-  	_ = errset.Error() // можно обработать ошибку
-  	/*
-  		Output:
-  		---
-  		Started
-  		New DBConn
-  		Connecting DBConn
-  		Connected DBConn
-  		New HTTPServer
-  		Serving HTTPServer
-  		^CStop HTTPServer
-  		Stop DBConn
-  		Stopped DBConn
-  		Stopped HTTPServer
-  		Finished serving HTTPServer
-  	*/
-  }
-  
-  func runApp(ctx context.Context, logger components.Logger, errSet *ErrSet) error {
-  	var err error
-  
-  	dbConn := components.NewDBConn(logger)
-  	if err := dbConn.Connect(ctx); err != nil {
-  		return fmt.Errorf("cant connect dbConn: %w", err)
-  	}
-  	defer Shutdown("dbConn", errSet, dbConn.Stop)
-  
-  	httpServer := components.NewHTTPServer(logger, dbConn)
-  	if ctx, err = Serve(ctx, "httpServer", errSet, httpServer.Serve); err != nil && !errors.Is(err, http.ErrServerClosed) {
-  		return fmt.Errorf("cant serve httpServer: %w", err)
-  	}
-  	defer Shutdown("httpServer", errSet, httpServer.Stop)
-  
-  	components.AwaitSignal(ctx)
-  	return ctx.Err()
-  }
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+
+	"errors"
+	"net/http"
+
+	"github.com/vivid-money/article-golang-di/pkg/components"
+)
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	logger := log.New(os.Stderr, "", 0)
+	logger.Print("Started")
+
+	go func() {
+		components.AwaitSignal(ctx)
+		cancel()
+	}()
+
+	errset := &ErrSet{}
+
+	errset.Add(runApp(ctx, logger, errset))
+
+	_ = errset.Error() // можно обработать ошибку
+	/*
+		Output:
+		---
+		Started
+		New DBConn
+		Connecting DBConn
+		Connected DBConn
+		New HTTPServer
+		Serving HTTPServer
+		^CStop HTTPServer
+		Stop DBConn
+		Stopped DBConn
+		Stopped HTTPServer
+		Finished serving HTTPServer
+	*/
+}
+
+func runApp(ctx context.Context, logger components.Logger, errSet *ErrSet) error {
+	var err error
+
+	dbConn := components.NewDBConn(logger)
+	if err := dbConn.Connect(ctx); err != nil {
+		return fmt.Errorf("cant connect dbConn: %w", err)
+	}
+	defer Shutdown("dbConn", errSet, dbConn.Stop)
+
+	httpServer := components.NewHTTPServer(logger, dbConn)
+	if ctx, err = Serve(ctx, "httpServer", errSet, httpServer.Serve); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("cant serve httpServer: %w", err)
+	}
+	defer Shutdown("httpServer", errSet, httpServer.Stop)
+
+	components.AwaitSignal(ctx)
+	return ctx.Err()
+}
 ```
 В качесте примечания укажу, что в данном примере все компоненты запускаются исключительно в фоновом контексте и напомню, что это лишь демонстрационный образец, который не включает в себя обработку части ошибок и прочих необходимых в продакшене вещей.
 
